@@ -1,0 +1,8 @@
+{
+  "name": "blurp",
+  "module": "src/main.cpp",
+  "scripts": {
+    "configure": "rm -rf build/* && cmake -B build -D CMAKE_BUILD_TYPE=Release",
+    "build": "cmake --build build"
+  }
+}
