@@ -3,6 +3,7 @@
   "module": "src/main.cpp",
   "scripts": {
     "configure": "rm -rf build/* && cmake -B build -D CMAKE_BUILD_TYPE=Release",
-    "build": "cmake --build build"
+    "build": "cmake --build build",
+    "flash-dfu": "dfu-util -a 0 -s 0x08000000:leave -D build/test-synth.bin -d ,0483:df11"
   }
 }
