@@ -4,6 +4,8 @@
 using namespace daisy;
 using namespace daisysp;
 
+const int NUM_VOICES = 6;
+
 DaisyPod hw;
 Oscillator osc1, osc2, osc3;
 Svf filter;
@@ -17,31 +19,6 @@ enum Mode {
 };
 Mode currentMode = MODE_DEFAULT;
 
-// Three-part harmony with moody minor progressions
-const int HARMONY_NOTES[32][3] = {
-    {62, 65, 69}, {57, 60, 65}, {53, 57, 60}, {50, 53, 57},  // Dm, Am, Em, Bm
-    {60, 63, 67}, {55, 58, 63}, {51, 55, 58}, {50, 53, 58},  // Cm, Gm, Dm, Bm
-    {58, 62, 65}, {53, 57, 62}, {50, 53, 57}, {55, 58, 62},  // Am, Em, Bm, Gm
-    {57, 60, 64}, {52, 55, 60}, {50, 54, 57}, {53, 57, 60},  // Gm, Dm, Bm, Em
-    {60, 63, 67}, {55, 58, 63}, {51, 55, 58}, {50, 53, 58},  // Cm, Gm, Dm, Bm
-    {58, 62, 65}, {53, 57, 62}, {50, 53, 57}, {55, 58, 62},  // Am, Em, Bm, Gm
-    {62, 65, 69}, {57, 60, 65}, {53, 57, 60}, {50, 53, 57},  // Dm, Am, Em, Bm
-    {60, 63, 67}, {55, 58, 63}, {51, 55, 58}, {50, 53, 58}   // Cm, Gm, Dm, Bm
-};
-
-const uint32_t NOTE_DURATIONS[32] = {
-    300, 300, 300, 300, 300, 300, 300, 300,  // Doubled the duration from 150 to 300ms
-    300, 300, 300, 300, 300, 300, 300, 300,
-    300, 300, 300, 300, 300, 300, 300, 300,
-    300, 300, 300, 300, 300, 300, 300, 600   // Final note also doubled from 300 to 600ms
-};
-
-// Note sequence
-const int MELODY_LENGTH = 32;
-int currentNote = 0;
-uint32_t noteTimer = 0;
-uint32_t currentDuration = NOTE_DURATIONS[0];
-
 // Waveform selection
 int currentWaveform = 0;
 const int NUM_WAVEFORMS = 4;
@@ -52,12 +29,24 @@ const int WAVEFORMS[NUM_WAVEFORMS] = {
     Oscillator::WAVE_SIN
 };
 
-// Strum control (changed from const to variable)
+// Strum control
 float STRUM_DELAY_MS = 30.0f;
 uint32_t voice2DelayTimer = 0;
 uint32_t voice3DelayTimer = 0;
 bool voice2Pending = false;
 bool voice3Pending = false;
+
+// MIDI note tracking
+struct Voice {
+    int midiNote = -1;
+    bool active = false;
+    float velocity = 0.0f;
+    uint32_t age = 0; // Track how long this voice has been active
+
+    Oscillator osc;
+    AdEnv env;
+
+} voices[NUM_VOICES];
 
 // Global settings state
 struct Settings {
@@ -88,6 +77,95 @@ bool hasKnobCaught(float knobValue, float storedValue, bool wasCaught) {
     return fabs(knobValue - storedValue) < threshold;
 }
 
+// Find oldest voice to steal
+int findOldestVoice() {
+    int oldestIdx = 0;
+    uint32_t oldestAge = voices[0].age;
+    
+    for(int i = 1; i < NUM_VOICES; i++) {
+        if(voices[i].age > oldestAge) {
+            oldestAge = voices[i].age;
+            oldestIdx = i;
+        }
+    }
+    return oldestIdx;
+}
+
+// Find available voice or steal oldest if needed
+int findAvailableVoice(int noteNumber) {
+    // First, check if this note is already playing (prevent retriggering)
+    for(int i = 0; i < NUM_VOICES; i++) {
+        if(voices[i].midiNote == noteNumber && voices[i].active) {
+            return -1;
+        }
+    }
+    
+    // Then, look for an inactive voice
+    for(int i = 0; i < NUM_VOICES; i++) {
+        if(!voices[i].active) {
+            return i;
+        }
+    }
+    
+    // If all voices are active, steal the oldest one
+    return findOldestVoice();
+}
+
+void HandleMidiMessage(MidiEvent m) {
+    switch(m.type) {
+        case NoteOn: {
+            NoteOnEvent p = m.AsNoteOn();
+            if(p.velocity == 0) {
+                // Note-off message in disguise
+                for(int i = 0; i < NUM_VOICES; i++) {
+                    if(voices[i].midiNote == p.note && voices[i].active) {
+                        voices[i].active = false;
+                    }
+                }
+                return;
+            }
+
+            // Flash LED for visual feedback
+            hw.led1.Set(1.0f, 1.0f, 1.0f);
+            hw.UpdateLeds();
+            
+            int voice = findAvailableVoice(p.note);
+            if(voice == -1) return; // Note is already playing
+            
+            // Set up the voice
+            voices[voice].midiNote = p.note;
+            voices[voice].active = true;
+            voices[voice].velocity = p.velocity / 127.0f;
+            voices[voice].age = 0; // Reset age for new note
+            voices[voice].osc.SetFreq(mtof(p.note));
+            voices[voice].env.Trigger();
+            
+            // Increment age of other voices
+            for(int i = 0; i < NUM_VOICES; i++) {
+                if(i != voice && voices[i].active) {
+                    voices[i].age++;
+                }
+            }
+            
+            // Turn off LED after brief delay
+            System::Delay(10);
+            hw.led1.Set(0.0f, 0.0f, 0.0f);
+            hw.UpdateLeds();
+            break;
+        }
+        
+        case NoteOff: {
+            NoteOffEvent p = m.AsNoteOff();
+            for(int i = 0; i < NUM_VOICES; i++) {
+                if(voices[i].midiNote == p.note && voices[i].active) {
+                    voices[i].active = false;
+                }
+            }
+            break;
+        }
+    }
+}
+
 void AudioCallback(AudioHandle::InputBuffer in,
                   AudioHandle::OutputBuffer out,
                   size_t size)
@@ -101,9 +179,9 @@ void AudioCallback(AudioHandle::InputBuffer in,
         if(currentWaveform < 0) currentWaveform = NUM_WAVEFORMS - 1;
         
         // Set all oscillators to the same waveform
-        osc1.SetWaveform(WAVEFORMS[currentWaveform]);
-        osc2.SetWaveform(WAVEFORMS[currentWaveform]);
-        osc3.SetWaveform(WAVEFORMS[currentWaveform]);
+        for(int v = 0; v < NUM_VOICES; v++) {
+            voices[v].osc.SetWaveform(WAVEFORMS[currentWaveform]);
+        }
     }
 
     // Handle mode switching
@@ -150,29 +228,22 @@ void AudioCallback(AudioHandle::InputBuffer in,
             if (hasKnobCaught(knob1, settings.attackTime, knobStates[MODE_ENVELOPE].caught1)) {
                 knobStates[MODE_ENVELOPE].caught1 = true;
                 settings.attackTime = fmap(knob1, 0.001f, 0.5f);
-                env1.SetTime(ADENV_SEG_ATTACK, settings.attackTime);
-                env2.SetTime(ADENV_SEG_ATTACK, settings.attackTime);
-                env3.SetTime(ADENV_SEG_ATTACK, settings.attackTime);
+                for(int v = 0; v < NUM_VOICES; v++) {
+                    voices[v].env.SetTime(ADENV_SEG_ATTACK, settings.attackTime);
+                }
             }
             
             // Update release only if knob has caught up
             if (hasKnobCaught(knob2, settings.releaseTime, knobStates[MODE_ENVELOPE].caught2)) {
                 knobStates[MODE_ENVELOPE].caught2 = true;
                 settings.releaseTime = fmap(knob2, 0.1f, 2.0f);
-                env1.SetTime(ADENV_SEG_DECAY, settings.releaseTime);
-                env2.SetTime(ADENV_SEG_DECAY, settings.releaseTime);
-                env3.SetTime(ADENV_SEG_DECAY, settings.releaseTime);
+                for(int v = 0; v < NUM_VOICES; v++) {
+                    voices[v].env.SetTime(ADENV_SEG_DECAY, settings.releaseTime);
+                }
             }
             break;
 
         case MODE_FILTER_STRUM:
-            // Update tempo only if knob has caught up (0.25x to 4x speed)
-            if (hasKnobCaught(knob1, settings.tempo/4.0f, knobStates[MODE_FILTER_STRUM].caught1)) {
-                knobStates[MODE_FILTER_STRUM].caught1 = true;
-                settings.tempo = fmap(knob1, 0.25f, 4.0f);
-                // Current duration will be updated in the timing section
-            }
-            
             // Update strum delay only if knob has caught up
             if (hasKnobCaught(knob2, settings.strumDelay/200.0f, knobStates[MODE_FILTER_STRUM].caught2)) {
                 knobStates[MODE_FILTER_STRUM].caught2 = true;
@@ -198,54 +269,17 @@ void AudioCallback(AudioHandle::InputBuffer in,
             break;
     }
 
-    // Get timing
-    static uint32_t lastTime = System::GetNow();
-    uint32_t currentTime = System::GetNow();
-    
-    // Check if it's time for next note
-    if(currentTime - lastTime >= (currentDuration / settings.tempo)) {
-        lastTime = currentTime;
-        currentNote = (currentNote + 1) % MELODY_LENGTH;
-        currentDuration = NOTE_DURATIONS[currentNote];
-        
-        // Set new frequencies for three-part harmony with slight detuning
-        float freq1 = mtof(HARMONY_NOTES[currentNote][0]);
-        float freq2 = mtof(HARMONY_NOTES[currentNote][1]) * 1.002f; // +0.2% detuning
-        float freq3 = mtof(HARMONY_NOTES[currentNote][2]) * 0.998f; // -0.2% detuning
-        
-        osc1.SetFreq(freq1);
-        osc2.SetFreq(freq2);
-        osc3.SetFreq(freq3);
-        
-        // Trigger first voice immediately
-        env1.Trigger();
-        
-        // Set up delayed triggers for other voices
-        voice2Pending = true;
-        voice3Pending = true;
-        voice2DelayTimer = currentTime;
-        voice3DelayTimer = currentTime;
-    }
-
-    // Handle delayed voice triggers
-    if(voice2Pending && (currentTime - voice2DelayTimer >= STRUM_DELAY_MS)) {
-        env2.Trigger();
-        voice2Pending = false;
-    }
-    if(voice3Pending && (currentTime - voice3DelayTimer >= STRUM_DELAY_MS * 2)) {
-        env3.Trigger();
-        voice3Pending = false;
-    }
-
     for(size_t i = 0; i < size; i++)
     {
-        // Process each voice with its own envelope
-        float voice1 = osc1.Process() * env1.Process();
-        float voice2 = osc2.Process() * env2.Process();
-        float voice3 = osc3.Process() * env3.Process();
+        // Process all voices
+        float signal = 0.0f;
+        for(int v = 0; v < NUM_VOICES; v++) {
+            float voiceOutput = voices[v].osc.Process() * voices[v].env.Process();
+            signal += voiceOutput * (voices[v].active ? voices[v].velocity : 0.0f);
+        }
         
-        // Mix voices with slightly reduced amplitude to prevent clipping
-        float signal = (voice1 + voice2 + voice3) * 0.2f;
+        // Scale final mix to prevent clipping based on number of voices
+        signal *= (0.6f / NUM_VOICES);
         
         filter.Process(signal);
         float filtered = filter.Low();
@@ -263,42 +297,45 @@ int main(void)
     hw.Init();
     hw.StartAdc();
     
+    // Initialize MIDI for TRS input
+    hw.midi.StartReceive();
+    
     // Initialize all oscillators
     float sampleRate = hw.AudioSampleRate();
-    osc1.Init(sampleRate);
-    osc2.Init(sampleRate);
-    osc3.Init(sampleRate);
     filter.Init(sampleRate);
     
-    // Initialize envelopes
-    env1.Init(sampleRate);
-    env2.Init(sampleRate);
-    env3.Init(sampleRate);
-    
-    // Set envelope parameters for each voice
-    for(AdEnv* env : {&env1, &env2, &env3}) {
-        env->SetTime(ADENV_SEG_ATTACK, 0.005);  // Faster attack
-        env->SetTime(ADENV_SEG_DECAY, 0.15);    // Shorter decay
-        env->SetMin(0.0);
-        env->SetMax(0.8);                       // Slightly reduced maximum
-        env->SetCurve(0);                       // Linear curve
+    // Initialize oscillators and envelopes for each voice
+    for(int v = 0; v < NUM_VOICES; v++) {
+        voices[v].osc.Init(sampleRate);
+        voices[v].env.Init(sampleRate);
+        
+        // Set envelope parameters
+        voices[v].env.SetTime(ADENV_SEG_ATTACK, 0.005);  // Faster attack
+        voices[v].env.SetTime(ADENV_SEG_DECAY, 0.15);    // Shorter decay
+        voices[v].env.SetMin(0.0);
+        voices[v].env.SetMax(0.8);                       // Slightly reduced maximum
+        voices[v].env.SetCurve(0);                       // Linear curve
+        
+        // Set initial waveform
+        voices[v].osc.SetWaveform(Oscillator::WAVE_POLYBLEP_SAW);
     }
-    
-    // Set same initial waveform for all oscillators
-    osc1.SetWaveform(Oscillator::WAVE_POLYBLEP_SAW);
-    osc2.SetWaveform(Oscillator::WAVE_POLYBLEP_SAW);
-    osc3.SetWaveform(Oscillator::WAVE_POLYBLEP_SAW);
-    
-    // Initialize with first chord
-    osc1.SetFreq(mtof(HARMONY_NOTES[0][0]));
-    osc2.SetFreq(mtof(HARMONY_NOTES[0][1]));
-    osc3.SetFreq(mtof(HARMONY_NOTES[0][2]));
 
     // Set up filter
     filter.SetRes(0.4f);  // Set a moderate fixed resonance
     filter.SetDrive(0.3f);
 
     hw.StartAudio(AudioCallback);
+
+    for(;;)
+    {
+        hw.midi.Listen();    
+        // Handle USB MIDI Events
+        while(hw.midi.HasEvents())
+        {
+            HandleMidiMessage(hw.midi.PopEvent());
+        }
+
+    }
 
     while(1) {}
 }
