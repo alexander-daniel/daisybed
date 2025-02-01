@@ -18,7 +18,13 @@ project("basic-monosynth" VERSION 0.1.0)
 set(FIRMWARE_NAME "basic-monosynth")
 set(FIRMWARE_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/src/main.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/src/knob.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/src/Voice.cpp
 )
+
+# Add include directory for header files
+include_directories(${CMAKE_CURRENT_LIST_DIR}/src)
+
 
 set(DAISY_GENERATE_BIN ON)
 include(DaisyProject)

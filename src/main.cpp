@@ -1,14 +1,12 @@
 #include "daisy_pod.h"
 #include "daisysp.h"
+#include "knob.h"
+#include "Voice.h"
 
 using namespace daisy;
 using namespace daisysp;
 
 const int NUM_VOICES = 10;
-
-DaisyPod hw;
-Svf filter;
-
 // Mode tracking
 enum Mode {
     MODE_DEFAULT,
@@ -17,47 +15,9 @@ enum Mode {
 };
 Mode currentMode = MODE_DEFAULT;
 
-// Knob class to handle value catching and mapping
-class Knob {
-public:
-    Knob() : caught(false) {}
-    
-    void Init(float initValue, float minVal, float maxVal) {
-        value = initValue;
-        min = minVal;
-        max = maxVal;
-        caught = false;
-    }
-    
-    bool Update(float knobValue) {
-        // Check if knob has caught up to stored value
-        if (!caught) {
-            float normalizedStored = (value - min) / (max - min);
-            caught = hasKnobCaught(knobValue, normalizedStored);
-        }
-        
-        // Only update value if caught
-        if (caught) {
-            value = min + knobValue * (max - min);
-            return true;
-        }
-        return false;
-    }
-    
-    float GetValue() const { return value; }
-    void Reset() { caught = false; }
-    
-private:
-    bool hasKnobCaught(float knobValue, float storedValue) {
-        const float threshold = 0.02f;
-        return fabs(knobValue - storedValue) < threshold;
-    }
-    
-    float value;
-    float min;
-    float max;
-    bool caught;
-};
+DaisyPod hw;
+Svf filter;
+Voice voices[NUM_VOICES];
 
 // Waveform selection
 int currentWaveform = 0;
@@ -69,68 +29,15 @@ const int WAVEFORMS[NUM_WAVEFORMS] = {
     Oscillator::WAVE_SIN
 };
 
-// MIDI note tracking
-class Voice {
-public:
-    Voice() : midiNote(-1), active(false), releasing(false), velocity(0.0f), age(0) {}
-    
-    void Init(float sampleRate) {
-        osc.Init(sampleRate);
-        env.Init(sampleRate);
-        
-        // Set envelope parameters
-        env.SetTime(ADENV_SEG_ATTACK, 0.005);  // Faster attack
-        env.SetTime(ADENV_SEG_DECAY, 0.35);    // medium decay
-        env.SetMin(0.0);
-        env.SetMax(0.9);                       // Slightly reduced maximum
-        env.SetCurve(0);                       // Linear curve
-        
-        // Set initial waveform
-        osc.SetWaveform(Oscillator::WAVE_POLYBLEP_SAW);
-    }
-    
-    void SetNote(int note, float vel) {
-        midiNote = note;
-        active = true;
-        velocity = vel;
-        age = 0;
-        osc.SetFreq(mtof(note));
-        env.Trigger();
-    }
-    
-    void Release() {
-        active = false;
-        releasing = true;
-    }
-    
-    void Clear() {
-        releasing = false;
-        midiNote = -1;
-    }
-    
-    bool IsActive() const { return active || releasing; }
-    int GetNote() const { return midiNote; }
-    uint32_t GetAge() const { return age; }
-    void IncrementAge() { age++; }
-    
-    Oscillator osc;
-    AdEnv env;
-
-private:
-    int midiNote;
-    bool active;
-    bool releasing;
-    float velocity;
-    uint32_t age;
-
-} voices[NUM_VOICES];
-
 // Control parameters with knobs
 struct Controls {
     Knob attackKnob;
     Knob releaseKnob;
     Knob cutoffKnob;
     Knob resonanceKnob;
+    
+    // Add constructor with initialization list
+    Controls() : attackKnob(), releaseKnob(), cutoffKnob(), resonanceKnob() {}
     
     void Init() {
         attackKnob.Init(0.005f, 0.001f, 1.0f);
