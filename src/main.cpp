@@ -7,9 +7,7 @@ using namespace daisysp;
 const int NUM_VOICES = 10;
 
 DaisyPod hw;
-Oscillator osc1, osc2, osc3;
 Svf filter;
-AdEnv env1, env2, env3; // Multiple envelopes for polyphony
 
 // Mode tracking
 enum Mode {
@@ -18,6 +16,48 @@ enum Mode {
     MODE_AD
 };
 Mode currentMode = MODE_DEFAULT;
+
+// Knob class to handle value catching and mapping
+class Knob {
+public:
+    Knob() : caught(false) {}
+    
+    void Init(float initValue, float minVal, float maxVal) {
+        value = initValue;
+        min = minVal;
+        max = maxVal;
+        caught = false;
+    }
+    
+    bool Update(float knobValue) {
+        // Check if knob has caught up to stored value
+        if (!caught) {
+            float normalizedStored = (value - min) / (max - min);
+            caught = hasKnobCaught(knobValue, normalizedStored);
+        }
+        
+        // Only update value if caught
+        if (caught) {
+            value = min + knobValue * (max - min);
+            return true;
+        }
+        return false;
+    }
+    
+    float GetValue() const { return value; }
+    void Reset() { caught = false; }
+    
+private:
+    bool hasKnobCaught(float knobValue, float storedValue) {
+        const float threshold = 0.02f;
+        return fabs(knobValue - storedValue) < threshold;
+    }
+    
+    float value;
+    float min;
+    float max;
+    bool caught;
+};
 
 // Waveform selection
 int currentWaveform = 0;
@@ -30,56 +70,99 @@ const int WAVEFORMS[NUM_WAVEFORMS] = {
 };
 
 // MIDI note tracking
-struct Voice {
-    int midiNote = -1;
-    bool active = false;
-    bool releasing = false;  // New flag to track release state
-    float velocity = 0.0f;
-    uint32_t age = 0; // Track how long this voice has been active
-
+class Voice {
+public:
+    Voice() : midiNote(-1), active(false), releasing(false), velocity(0.0f), age(0) {}
+    
+    void Init(float sampleRate) {
+        osc.Init(sampleRate);
+        env.Init(sampleRate);
+        
+        // Set envelope parameters
+        env.SetTime(ADENV_SEG_ATTACK, 0.005);  // Faster attack
+        env.SetTime(ADENV_SEG_DECAY, 0.35);    // medium decay
+        env.SetMin(0.0);
+        env.SetMax(0.9);                       // Slightly reduced maximum
+        env.SetCurve(0);                       // Linear curve
+        
+        // Set initial waveform
+        osc.SetWaveform(Oscillator::WAVE_POLYBLEP_SAW);
+    }
+    
+    void SetNote(int note, float vel) {
+        midiNote = note;
+        active = true;
+        velocity = vel;
+        age = 0;
+        osc.SetFreq(mtof(note));
+        env.Trigger();
+    }
+    
+    void Release() {
+        active = false;
+        releasing = true;
+    }
+    
+    void Clear() {
+        releasing = false;
+        midiNote = -1;
+    }
+    
+    bool IsActive() const { return active || releasing; }
+    int GetNote() const { return midiNote; }
+    uint32_t GetAge() const { return age; }
+    void IncrementAge() { age++; }
+    
     Oscillator osc;
     AdEnv env;
 
+private:
+    int midiNote;
+    bool active;
+    bool releasing;
+    float velocity;
+    uint32_t age;
+
 } voices[NUM_VOICES];
 
-// Global settings state
-struct Settings {
-    // Envelope settings
-    float attackTime = 0.005f;    // Default 5ms
-    float releaseTime = 0.15f;    // Default 150ms
+// Control parameters with knobs
+struct Controls {
+    Knob attackKnob;
+    Knob releaseKnob;
+    Knob cutoffKnob;
+    Knob resonanceKnob;
     
-    // Filter settings
-    float filterCutoff = 2000.0f; // Default 2kHz
-    float filterRes = 0.4f;       // Default resonance
-} settings;
-
-// Add these after the Settings struct
-struct KnobState {
-    bool caught1 = false;  // Whether knob1 has caught up to its stored value
-    bool caught2 = false;  // Whether knob2 has caught up to its stored value
-} knobStates[3];  // One state for each mode
-
-// Helper function to map a value from one range back to 0-1
-float fonemap(float value, float min, float max) {
-    return (value - min) / (max - min);
-}
-
-// Helper function to determine if a knob has "caught" the stored value
-bool hasKnobCaught(float knobValue, float storedValue, bool wasCaught) {
-    if (wasCaught) return true;
-    // Consider the value "caught" when the knob is within 2% of the stored value
-    const float threshold = 0.02f;
-    return fabs(knobValue - storedValue) < threshold;
-}
+    void Init() {
+        attackKnob.Init(0.005f, 0.001f, 1.0f);
+        releaseKnob.Init(0.15f, 0.1f, 1.0f);
+        cutoffKnob.Init(2000.0f, 200.0f, 10000.0f);
+        resonanceKnob.Init(0.4f, 0.1f, 0.95f);
+    }
+    
+    void ResetMode(Mode mode) {
+        switch(mode) {
+            case MODE_AD:
+                attackKnob.Reset();
+                releaseKnob.Reset();
+                break;
+            case MODE_FILTER:
+                cutoffKnob.Reset();
+                resonanceKnob.Reset();
+                break;
+            default:
+                break;
+        }
+    }
+} controls;
 
 // Find oldest voice to steal
 int findOldestVoice() {
     int oldestIdx = 0;
-    uint32_t oldestAge = voices[0].age;
+    uint32_t oldestAge = voices[0].GetAge();
     
     for(int i = 1; i < NUM_VOICES; i++) {
-        if(voices[i].age > oldestAge) {
-            oldestAge = voices[i].age;
+        if(voices[i].GetAge() > oldestAge) {
+            oldestAge = voices[i].GetAge();
             oldestIdx = i;
         }
     }
@@ -90,14 +173,14 @@ int findOldestVoice() {
 int findAvailableVoice(int noteNumber) {
     // First, check if this note is already playing (prevent retriggering)
     for(int i = 0; i < NUM_VOICES; i++) {
-        if(voices[i].midiNote == noteNumber && voices[i].active) {
+        if(voices[i].GetNote() == noteNumber && voices[i].IsActive()) {
             return -1;
         }
     }
     
     // Then, look for an inactive voice
     for(int i = 0; i < NUM_VOICES; i++) {
-        if(!voices[i].active) {
+        if(!voices[i].IsActive()) {
             return i;
         }
     }
@@ -113,8 +196,8 @@ void HandleMidiMessage(MidiEvent m) {
             if(p.velocity == 0) {
                 // Note-off message in disguise
                 for(int i = 0; i < NUM_VOICES; i++) {
-                    if(voices[i].midiNote == p.note && voices[i].active) {
-                        voices[i].active = false;
+                    if(voices[i].GetNote() == p.note && voices[i].IsActive()) {
+                        voices[i].Release();
                     }
                 }
                 return;
@@ -124,17 +207,12 @@ void HandleMidiMessage(MidiEvent m) {
             if(voice == -1) return; // Note is already playing
             
             // Set up the voice
-            voices[voice].midiNote = p.note;
-            voices[voice].active = true;
-            voices[voice].velocity = p.velocity / 127.0f;
-            voices[voice].age = 0; // Reset age for new note
-            voices[voice].osc.SetFreq(mtof(p.note));
-            voices[voice].env.Trigger();
+            voices[voice].SetNote(p.note, p.velocity / 127.0f);
             
             // Increment age of other voices
             for(int i = 0; i < NUM_VOICES; i++) {
-                if(i != voice && voices[i].active) {
-                    voices[i].age++;
+                if(i != voice && voices[i].IsActive()) {
+                    voices[i].IncrementAge();
                 }
             }
             
@@ -144,9 +222,8 @@ void HandleMidiMessage(MidiEvent m) {
         case NoteOff: {
             NoteOffEvent p = m.AsNoteOff();
             for(int i = 0; i < NUM_VOICES; i++) {
-                if(voices[i].midiNote == p.note && voices[i].active) {
-                    voices[i].active = false;
-                    voices[i].releasing = true;  // Start release phase
+                if(voices[i].GetNote() == p.note && voices[i].IsActive()) {
+                    voices[i].Release();
                 }
             }
             break;
@@ -174,16 +251,13 @@ void AudioCallback(AudioHandle::InputBuffer in,
 
     // Handle mode switching
     if(hw.button1.RisingEdge()) {
-        // Reset catch states when leaving FILTER mode
         if(currentMode == MODE_FILTER) {
             currentMode = MODE_DEFAULT;
-            knobStates[MODE_FILTER].caught1 = false;
-            knobStates[MODE_FILTER].caught2 = false;
         } else {
             currentMode = MODE_FILTER;
-            knobStates[MODE_FILTER].caught1 = false;
-            knobStates[MODE_FILTER].caught2 = false;
         }
+        controls.ResetMode(currentMode);
+        
         // Turn off both LEDs and then set the active one
         hw.led1.Set(0.0f, 0.0f, 0.0f);
         hw.led2.Set(0.0f, 0.0f, 0.0f);
@@ -199,9 +273,7 @@ void AudioCallback(AudioHandle::InputBuffer in,
         } else {
             currentMode = MODE_AD;
         }
-        // Always reset catch states when toggling AD mode
-        knobStates[MODE_AD].caught1 = false;
-        knobStates[MODE_AD].caught2 = false;
+        controls.ResetMode(currentMode);
         
         // Turn off both LEDs and then set the active one
         hw.led1.Set(0.0f, 0.0f, 0.0f);
@@ -217,38 +289,28 @@ void AudioCallback(AudioHandle::InputBuffer in,
 
     switch(currentMode) {
         case MODE_AD:
-            // Update attack only if knob has caught up
-            if (hasKnobCaught(knob1, fmap(settings.attackTime, 0.001f, 0.1f), knobStates[MODE_AD].caught1)) {
-                knobStates[MODE_AD].caught1 = true;
-                settings.attackTime = fmap(knob1, 0.001f, 1.0f);
+            if (controls.attackKnob.Update(knob1)) {
+                float attackTime = controls.attackKnob.GetValue();
                 for(int v = 0; v < NUM_VOICES; v++) {
-                    voices[v].env.SetTime(ADENV_SEG_ATTACK, settings.attackTime);
+                    voices[v].env.SetTime(ADENV_SEG_ATTACK, attackTime);
                 }
             }
             
-            // Update release only if knob has caught up
-            if (hasKnobCaught(knob2, fmap(settings.releaseTime, 0.1f, 1.0f), knobStates[MODE_AD].caught2)) {
-                knobStates[MODE_AD].caught2 = true;
-                settings.releaseTime = fmap(knob2, 0.1f, 1.0f);
+            if (controls.releaseKnob.Update(knob2)) {
+                float releaseTime = controls.releaseKnob.GetValue();
                 for(int v = 0; v < NUM_VOICES; v++) {
-                    voices[v].env.SetTime(ADENV_SEG_DECAY, settings.releaseTime);
+                    voices[v].env.SetTime(ADENV_SEG_DECAY, releaseTime);
                 }
             }
             break;
 
         case MODE_FILTER:
-            // Update filter cutoff only if knob has caught up
-            if (hasKnobCaught(knob1, fonemap(settings.filterCutoff, 200.0f, 10000.0f), knobStates[MODE_FILTER].caught1)) {
-                knobStates[MODE_FILTER].caught1 = true;
-                settings.filterCutoff = fmap(knob1, 200.0f, 10000.0f);
-                filter.SetFreq(settings.filterCutoff);
+            if (controls.cutoffKnob.Update(knob1)) {
+                filter.SetFreq(controls.cutoffKnob.GetValue());
             }
             
-            // Update resonance only if knob has caught up
-            if (hasKnobCaught(knob2, fonemap(settings.filterRes, 0.1f, 0.95f), knobStates[MODE_FILTER].caught2)) {
-                knobStates[MODE_FILTER].caught2 = true;
-                settings.filterRes = fmap(knob2, 0.1f, 0.95f);
-                filter.SetRes(settings.filterRes);
+            if (controls.resonanceKnob.Update(knob2)) {
+                filter.SetRes(controls.resonanceKnob.GetValue());
             }
             break;
 
@@ -262,15 +324,14 @@ void AudioCallback(AudioHandle::InputBuffer in,
         for(int v = 0; v < NUM_VOICES; v++) {
             float envValue = voices[v].env.Process();
             // Check if envelope is done releasing
-            if(voices[v].releasing && envValue < 0.001f) {
-                voices[v].releasing = false;
-                voices[v].midiNote = -1;  // Clear the note
+            if(voices[v].IsActive() && envValue < 0.001f) {
+                voices[v].Clear();
             }
             
             float voiceOutput = voices[v].osc.Process() * envValue;
             // Use voice if either active or releasing
-            if(voices[v].active || voices[v].releasing) {
-                signal += voiceOutput * voices[v].velocity;
+            if(voices[v].IsActive()) {
+                signal += voiceOutput;
             }
         }
         
@@ -302,19 +363,11 @@ int main(void)
     
     // Initialize oscillators and envelopes for each voice
     for(int v = 0; v < NUM_VOICES; v++) {
-        voices[v].osc.Init(sampleRate);
-        voices[v].env.Init(sampleRate);
-        
-        // Set envelope parameters
-        voices[v].env.SetTime(ADENV_SEG_ATTACK, 0.005);  // Faster attack
-        voices[v].env.SetTime(ADENV_SEG_DECAY, 0.35);    // medium decay
-        voices[v].env.SetMin(0.0);
-        voices[v].env.SetMax(0.9);                       // Slightly reduced maximum
-        voices[v].env.SetCurve(0);                       // Linear curve
-        
-        // Set initial waveform
-        voices[v].osc.SetWaveform(Oscillator::WAVE_POLYBLEP_SAW);
+        voices[v].Init(sampleRate);
     }
+
+    // Initialize controls
+    controls.Init();
 
     // Set up filter
     filter.SetRes(0.4f);  // Set a moderate fixed resonance
