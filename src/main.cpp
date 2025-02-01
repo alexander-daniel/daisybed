@@ -23,23 +23,23 @@ Voice voices[NUM_VOICES];
 // Simple Schroeder Reverb implementation
 class SimpleReverb {
 private:
-    static const int NUM_COMBS = 6;  // Increased from 4
-    static const int NUM_ALLPASS = 3;  // Increased from 2
+    static const int NUM_COMBS = 8;
+    static const int NUM_ALLPASS = 4;
     
-    // Delay lines
-    DelayLine<float, 4096> combDelays[NUM_COMBS];  // Increased buffer size
-    DelayLine<float, 2048> allpassDelays[NUM_ALLPASS];  // Increased buffer size
+    // Larger delay lines for longer reverb tail
+    DelayLine<float, 8192> combDelays[NUM_COMBS];     // Doubled buffer size
+    DelayLine<float, 4096> allpassDelays[NUM_ALLPASS]; // Doubled buffer size
     
-    // Feedback coefficients - higher values for more reverb
-    float combFeedback[NUM_COMBS] = {0.88f, 0.87f, 0.86f, 0.85f, 0.84f, 0.83f};
-    float allpassFeedback = 0.7f;  // Increased from 0.5
+    // Higher feedback coefficients for longer decay
+    float combFeedback[NUM_COMBS] = {0.95f, 0.94f, 0.93f, 0.92f, 0.91f, 0.90f, 0.89f, 0.88f};
+    float allpassFeedback = 0.85f;  // Increased from 0.8
     
-    // Delay lengths (in samples) - longer delays for more spacious reverb
-    int combLengths[NUM_COMBS] = {2557, 2617, 2491, 2422, 2687, 2791};
-    int allpassLengths[NUM_ALLPASS] = {525, 756, 889};
+    // Longer delay lengths (still using prime numbers)
+    int combLengths[NUM_COMBS] = {7919, 8147, 8423, 8699, 8969, 9241, 9511, 9767};
+    int allpassLengths[NUM_ALLPASS] = {2371, 3079, 3677, 4177};
     
     float mix = 0.5f;
-    float feedback = 0.85f;  // Higher default feedback
+    float feedback = 0.85f;
 
 public:
     void Init(float sampleRate) {
@@ -334,8 +334,8 @@ void AudioCallback(AudioHandle::InputBuffer in,
             }
         }
         
-        // Scale final mix to prevent clipping based on number of voices
-        signal *= (0.8f / NUM_VOICES);  // Reduced slightly to allow for more reverb headroom
+        // Scale final mix to prevent clipping
+        signal *= (0.7f / NUM_VOICES);  // Reduced further for reverb headroom
         
         filter.Process(signal);
         float filtered = filter.Low();
