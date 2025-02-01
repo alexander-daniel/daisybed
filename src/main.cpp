@@ -4,7 +4,7 @@
 using namespace daisy;
 using namespace daisysp;
 
-const int NUM_VOICES = 6;
+const int NUM_VOICES = 10;
 
 DaisyPod hw;
 Oscillator osc1, osc2, osc3;
@@ -14,8 +14,8 @@ AdEnv env1, env2, env3; // Multiple envelopes for polyphony
 // Mode tracking
 enum Mode {
     MODE_DEFAULT,
-    MODE_ENVELOPE,
-    MODE_FILTER_STRUM
+    MODE_FILTER,
+    MODE_AD
 };
 Mode currentMode = MODE_DEFAULT;
 
@@ -29,17 +29,11 @@ const int WAVEFORMS[NUM_WAVEFORMS] = {
     Oscillator::WAVE_SIN
 };
 
-// Strum control
-float STRUM_DELAY_MS = 30.0f;
-uint32_t voice2DelayTimer = 0;
-uint32_t voice3DelayTimer = 0;
-bool voice2Pending = false;
-bool voice3Pending = false;
-
 // MIDI note tracking
 struct Voice {
     int midiNote = -1;
     bool active = false;
+    bool releasing = false;  // New flag to track release state
     float velocity = 0.0f;
     uint32_t age = 0; // Track how long this voice has been active
 
@@ -57,10 +51,6 @@ struct Settings {
     // Filter settings
     float filterCutoff = 2000.0f; // Default 2kHz
     float filterRes = 0.4f;       // Default resonance
-    
-    // Strum settings
-    float strumDelay = 30.0f;     // Default 30ms
-    float tempo = 1.0f;           // Default tempo multiplier (1.0 = normal speed)
 } settings;
 
 // Add these after the Settings struct
@@ -68,6 +58,11 @@ struct KnobState {
     bool caught1 = false;  // Whether knob1 has caught up to its stored value
     bool caught2 = false;  // Whether knob2 has caught up to its stored value
 } knobStates[3];  // One state for each mode
+
+// Helper function to map a value from one range back to 0-1
+float fonemap(float value, float min, float max) {
+    return (value - min) / (max - min);
+}
 
 // Helper function to determine if a knob has "caught" the stored value
 bool hasKnobCaught(float knobValue, float storedValue, bool wasCaught) {
@@ -124,10 +119,6 @@ void HandleMidiMessage(MidiEvent m) {
                 }
                 return;
             }
-
-            // Flash LED for visual feedback
-            hw.led1.Set(1.0f, 1.0f, 1.0f);
-            hw.UpdateLeds();
             
             int voice = findAvailableVoice(p.note);
             if(voice == -1) return; // Note is already playing
@@ -147,10 +138,6 @@ void HandleMidiMessage(MidiEvent m) {
                 }
             }
             
-            // Turn off LED after brief delay
-            System::Delay(10);
-            hw.led1.Set(0.0f, 0.0f, 0.0f);
-            hw.UpdateLeds();
             break;
         }
         
@@ -159,6 +146,7 @@ void HandleMidiMessage(MidiEvent m) {
             for(int i = 0; i < NUM_VOICES; i++) {
                 if(voices[i].midiNote == p.note && voices[i].active) {
                     voices[i].active = false;
+                    voices[i].releasing = true;  // Start release phase
                 }
             }
             break;
@@ -186,36 +174,41 @@ void AudioCallback(AudioHandle::InputBuffer in,
 
     // Handle mode switching
     if(hw.button1.RisingEdge()) {
-        if(currentMode == MODE_ENVELOPE) {
+        // Reset catch states when leaving FILTER mode
+        if(currentMode == MODE_FILTER) {
             currentMode = MODE_DEFAULT;
+            knobStates[MODE_FILTER].caught1 = false;
+            knobStates[MODE_FILTER].caught2 = false;
         } else {
-            currentMode = MODE_ENVELOPE;
-            // Clear other mode if active
-            if(currentMode == MODE_FILTER_STRUM) {
-                hw.led2.Set(0.0f, 0.0f, 0.0f);
-            }
+            currentMode = MODE_FILTER;
+            knobStates[MODE_FILTER].caught1 = false;
+            knobStates[MODE_FILTER].caught2 = false;
         }
-        // Reset catch state for the new mode
-        knobStates[currentMode].caught1 = false;
-        knobStates[currentMode].caught2 = false;
-        hw.led1.Set(currentMode == MODE_ENVELOPE ? 1.0f : 0.0f, 0.0f, 0.0f);
+        // Turn off both LEDs and then set the active one
+        hw.led1.Set(0.0f, 0.0f, 0.0f);
+        hw.led2.Set(0.0f, 0.0f, 0.0f);
+        if(currentMode == MODE_FILTER) {
+            hw.led1.Set(1.0f, 0.0f, 0.0f);
+        }
         hw.UpdateLeds();
     }
     
     if(hw.button2.RisingEdge()) {
-        if(currentMode == MODE_FILTER_STRUM) {
+        if(currentMode == MODE_AD) {
             currentMode = MODE_DEFAULT;
         } else {
-            currentMode = MODE_FILTER_STRUM;
-            // Clear other mode if active
-            if(currentMode == MODE_ENVELOPE) {
-                hw.led1.Set(0.0f, 0.0f, 0.0f);
-            }
+            currentMode = MODE_AD;
         }
-        // Reset catch state for the new mode
-        knobStates[currentMode].caught1 = false;
-        knobStates[currentMode].caught2 = false;
-        hw.led2.Set(0.0f, currentMode == MODE_FILTER_STRUM ? 1.0f : 0.0f, 0.0f);
+        // Always reset catch states when toggling AD mode
+        knobStates[MODE_AD].caught1 = false;
+        knobStates[MODE_AD].caught2 = false;
+        
+        // Turn off both LEDs and then set the active one
+        hw.led1.Set(0.0f, 0.0f, 0.0f);
+        hw.led2.Set(0.0f, 0.0f, 0.0f);
+        if(currentMode == MODE_AD) {
+            hw.led2.Set(0.0f, 0.0f, 1.0f);
+        }
         hw.UpdateLeds();
     }
 
@@ -223,63 +216,66 @@ void AudioCallback(AudioHandle::InputBuffer in,
     float knob2 = hw.GetKnobValue(DaisyPod::KNOB_2);
 
     switch(currentMode) {
-        case MODE_ENVELOPE:
+        case MODE_AD:
             // Update attack only if knob has caught up
-            if (hasKnobCaught(knob1, settings.attackTime, knobStates[MODE_ENVELOPE].caught1)) {
-                knobStates[MODE_ENVELOPE].caught1 = true;
-                settings.attackTime = fmap(knob1, 0.001f, 0.5f);
+            if (hasKnobCaught(knob1, fmap(settings.attackTime, 0.001f, 0.1f), knobStates[MODE_AD].caught1)) {
+                knobStates[MODE_AD].caught1 = true;
+                settings.attackTime = fmap(knob1, 0.001f, 1.0f);
                 for(int v = 0; v < NUM_VOICES; v++) {
                     voices[v].env.SetTime(ADENV_SEG_ATTACK, settings.attackTime);
                 }
             }
             
             // Update release only if knob has caught up
-            if (hasKnobCaught(knob2, settings.releaseTime, knobStates[MODE_ENVELOPE].caught2)) {
-                knobStates[MODE_ENVELOPE].caught2 = true;
-                settings.releaseTime = fmap(knob2, 0.1f, 2.0f);
+            if (hasKnobCaught(knob2, fmap(settings.releaseTime, 0.1f, 1.0f), knobStates[MODE_AD].caught2)) {
+                knobStates[MODE_AD].caught2 = true;
+                settings.releaseTime = fmap(knob2, 0.1f, 1.0f);
                 for(int v = 0; v < NUM_VOICES; v++) {
                     voices[v].env.SetTime(ADENV_SEG_DECAY, settings.releaseTime);
                 }
             }
             break;
 
-        case MODE_FILTER_STRUM:
-            // Update strum delay only if knob has caught up
-            if (hasKnobCaught(knob2, settings.strumDelay/200.0f, knobStates[MODE_FILTER_STRUM].caught2)) {
-                knobStates[MODE_FILTER_STRUM].caught2 = true;
-                settings.strumDelay = fmap(knob2, 10.0f, 200.0f);
-                STRUM_DELAY_MS = settings.strumDelay;
-            }
-            break;
-
-        case MODE_DEFAULT:
+        case MODE_FILTER:
             // Update filter cutoff only if knob has caught up
-            if (hasKnobCaught(knob1, settings.filterCutoff/10000.0f, knobStates[MODE_DEFAULT].caught1)) {
-                knobStates[MODE_DEFAULT].caught1 = true;
+            if (hasKnobCaught(knob1, fonemap(settings.filterCutoff, 200.0f, 10000.0f), knobStates[MODE_FILTER].caught1)) {
+                knobStates[MODE_FILTER].caught1 = true;
                 settings.filterCutoff = fmap(knob1, 200.0f, 10000.0f);
                 filter.SetFreq(settings.filterCutoff);
             }
             
             // Update resonance only if knob has caught up
-            if (hasKnobCaught(knob2, settings.filterRes, knobStates[MODE_DEFAULT].caught2)) {
-                knobStates[MODE_DEFAULT].caught2 = true;
+            if (hasKnobCaught(knob2, fonemap(settings.filterRes, 0.1f, 0.95f), knobStates[MODE_FILTER].caught2)) {
+                knobStates[MODE_FILTER].caught2 = true;
                 settings.filterRes = fmap(knob2, 0.1f, 0.95f);
                 filter.SetRes(settings.filterRes);
             }
+            break;
+
+        case MODE_DEFAULT:
             break;
     }
 
     for(size_t i = 0; i < size; i++)
     {
-        // Process all voices
         float signal = 0.0f;
         for(int v = 0; v < NUM_VOICES; v++) {
-            float voiceOutput = voices[v].osc.Process() * voices[v].env.Process();
-            signal += voiceOutput * (voices[v].active ? voices[v].velocity : 0.0f);
+            float envValue = voices[v].env.Process();
+            // Check if envelope is done releasing
+            if(voices[v].releasing && envValue < 0.001f) {
+                voices[v].releasing = false;
+                voices[v].midiNote = -1;  // Clear the note
+            }
+            
+            float voiceOutput = voices[v].osc.Process() * envValue;
+            // Use voice if either active or releasing
+            if(voices[v].active || voices[v].releasing) {
+                signal += voiceOutput * voices[v].velocity;
+            }
         }
         
         // Scale final mix to prevent clipping based on number of voices
-        signal *= (0.6f / NUM_VOICES);
+        signal *= (0.9f / NUM_VOICES);
         
         filter.Process(signal);
         float filtered = filter.Low();
@@ -311,9 +307,9 @@ int main(void)
         
         // Set envelope parameters
         voices[v].env.SetTime(ADENV_SEG_ATTACK, 0.005);  // Faster attack
-        voices[v].env.SetTime(ADENV_SEG_DECAY, 0.15);    // Shorter decay
+        voices[v].env.SetTime(ADENV_SEG_DECAY, 0.35);    // medium decay
         voices[v].env.SetMin(0.0);
-        voices[v].env.SetMax(0.8);                       // Slightly reduced maximum
+        voices[v].env.SetMax(0.9);                       // Slightly reduced maximum
         voices[v].env.SetCurve(0);                       // Linear curve
         
         // Set initial waveform
@@ -322,7 +318,6 @@ int main(void)
 
     // Set up filter
     filter.SetRes(0.4f);  // Set a moderate fixed resonance
-    filter.SetDrive(0.3f);
 
     hw.StartAudio(AudioCallback);
 

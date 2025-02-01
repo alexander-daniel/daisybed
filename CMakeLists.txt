@@ -31,3 +31,12 @@ set(FIRMWARE_SOURCES
 
 set(DAISY_GENERATE_BIN ON)
 include(DaisyProject)
+
+project("midi-test" VERSION 0.1.0)
+set(FIRMWARE_NAME "midi-test")
+set(FIRMWARE_SOURCES
+    ${CMAKE_CURRENT_LIST_DIR}/src/basic-midi.cpp
+)
+
+set(DAISY_GENERATE_BIN ON)
+include(DaisyProject)
