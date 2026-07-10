@@ -50,9 +50,9 @@ Svf svf;                              // Single filter on the sum of voices
 Switch gate;                          // Gate input for triggering voices
 
 // Main audio callback of the program
-void AudioCallback(AudioHandle::InputBuffer in,
-                   AudioHandle::OutputBuffer out,
-                   size_t size)
+static void AudioCallback(AudioHandle::InputBuffer in,
+                          AudioHandle::OutputBuffer out,
+                          size_t size)
 {
 
   hw.ProcessAllControls();
