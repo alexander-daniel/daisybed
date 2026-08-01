@@ -1,0 +1,9 @@
+{
+  "context_servers": {
+    "codebase-memory-mcp": {
+      "command": "/Users/olocs/.local/bin/codebase-memory-mcp",
+      "args": [],
+      "env": {}
+    }
+  }
+}

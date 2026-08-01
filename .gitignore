@@ -173,3 +173,16 @@ dist
 
 # Finder (MacOS) folder config
 .DS_Store
+
+# CMake / build artifacts
+build/
+compile_commands.json
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+compile_commands.json
+Makefile
+*.bin
+*.elf
+*.map
+*.hex
