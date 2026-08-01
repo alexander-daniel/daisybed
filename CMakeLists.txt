@@ -2,6 +2,9 @@ cmake_minimum_required(VERSION 3.26)
 cmake_policy(SET CMP0048 NEW)
 cmake_policy(SET CMP0175 OLD)
 
+# Export compile_commands.json for clangd / IDE tooling
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
 # Load libDaisy first, it sets up the toolchain and project
 # to use all the ARM Cross-compiler stuff
 # set(DAISY_STORAGE QSPI)

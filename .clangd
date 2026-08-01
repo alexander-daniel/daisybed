@@ -1,0 +1,10 @@
+CompileFlags:
+  CompilationDatabase: build
+  Add:
+    - --target=arm-none-eabi
+    - --sysroot=/Library/DaisyToolchain/0.2.0/arm/arm-none-eabi
+    - -isystem/Library/DaisyToolchain/0.2.0/arm/arm-none-eabi/include/c++/10.3.1
+    - -isystem/Library/DaisyToolchain/0.2.0/arm/arm-none-eabi/include/c++/10.3.1/arm-none-eabi
+
+Diagnostics:
+  UnusedIncludes: None
